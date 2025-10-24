@@ -107,6 +107,10 @@ To show available settings, run qwen3.c without any command-line parameters:
 ./runq
 ```
 
+## For Developers
+
+Developers interested in contributing to this project should refer to the [Developer Documentation](DEVELOPERS.md) for a technical overview of the codebase.
+
 ## License
 
 MIT
