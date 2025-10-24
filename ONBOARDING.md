@@ -131,3 +131,65 @@ For more options, such as setting the temperature or using a system prompt, run 
 ```bash
 ./runq
 ```
+
+## Deep Dive into `runq.c`
+
+This section provides a more detailed explanation of the C implementation in `runq.c`.
+
+### Core Data Structures
+
+The `runq.c` file defines several key data structures that are used to manage the model and its state:
+
+*   **`Config`**: This struct holds the model's configuration, including the dimensions of the transformer, the number of layers and heads, the vocabulary size, and the maximum sequence length.
+*   **`QuantizedTensor`**: This struct represents a quantized tensor, containing a pointer to the quantized 8-bit integer data (`q`) and a pointer to the floating-point scaling factors (`s`).
+*   **`TransformerWeights`**: This struct contains all the weights of the model, including the token embeddings, RMSNorm weights, and the quantized weights for the attention mechanism and feed-forward network.
+*   **`RunState`**: This struct holds the runtime state of the model, including the activations, key-value cache, and output logits.
+*   **`Tokenizer`**: This struct manages the BPE tokenizer, including the vocabulary, merge scores, and token IDs for the beginning-of-sequence (BOS) and end-of-sequence (EOS) tokens.
+*   **`Sampler`**: This struct holds the parameters and state for the token sampler, including the vocabulary size, temperature, top-p value, and the random number generator state.
+
+### Neural Network Building Blocks
+
+The `runq.c` file contains several functions that form the building blocks of the transformer model:
+
+*   **`rmsnorm`**: This function implements the RMSNorm algorithm. It takes an input vector, a weight vector, and the size of the vectors as input, and it normalizes the input vector and scales it by the weight vector.
+*   **`softmax`**: This function implements the softmax function, which is used to convert a vector of logits into a probability distribution. It takes a vector of floats and its size as input, and it exponentiates and normalizes the vector in place.
+*   **`matmul`**: This function performs a matrix multiplication between a quantized weight tensor and a quantized input tensor. It is the most computationally intensive part of the forward pass and is optimized for performance using OpenMP for parallelization.
+
+### The `forward` Function
+
+The `forward` function is the heart of the C inference engine. It takes the current token and its position in the sequence as input and returns the logits for the next token. Here's a breakdown of the steps involved:
+
+1.  **Token Embedding:** The function first retrieves the token embedding from the `token_embedding_table`.
+2.  **Attention Mechanism:** For each layer in the transformer, the function performs the following steps:
+    *   **RMSNorm:** It applies RMSNorm to the input.
+    *   **QKV Calculation:** It calculates the query, key, and value vectors by performing matrix multiplications with the corresponding weight matrices.
+    *   **RoPE:** It applies rotary positional embeddings to the query and key vectors.
+    *   **Multi-Head Attention:** It calculates the attention scores, applies softmax, and computes the weighted sum of the value vectors.
+    *   **Output Projection:** It projects the output of the attention mechanism back into the residual stream.
+3.  **Feed-Forward Network:** After the attention mechanism, the function performs the following steps for each layer:
+    *   **RMSNorm:** It applies RMSNorm to the output of the attention block.
+    *   **SwiGLU:** It applies the SwiGLU activation function.
+    *   **Output Projection:** It projects the output of the feed-forward network back into the residual stream.
+4.  **Final RMSNorm and Classifier:** After the final layer, the function applies one last RMSNorm and then calculates the output logits by multiplying the final hidden state with the classifier weights.
+
+### Tokenizer Implementation
+
+The `runq.c` file includes a Byte Pair Encoding (BPE) tokenizer that is used to convert between text and tokens.
+
+*   **`decode`**: This function is straightforward. It takes a token ID as input and returns the corresponding string from the vocabulary.
+*   **`encode`**: This function is more complex. It takes a string as input and converts it into a sequence of tokens. It does this by iteratively merging the most frequent pairs of adjacent tokens until no more merges are possible.
+
+### Sampler Implementation
+
+The `runq.c` file provides several sampling strategies for generating the next token from the model's output logits:
+
+*   **`sample_argmax`**: This is the simplest sampling method. It selects the token with the highest logit value (i.e., the most likely token).
+*   **`sample_mult`**: This function performs multinomial sampling, where the next token is chosen randomly based on the probability distribution of the logits.
+*   **`sample_topp`**: This function implements top-p (or nucleus) sampling. It selects the next token from a subset of the vocabulary that have a cumulative probability greater than or equal to a given value `p`. This method can produce more diverse and interesting text than argmax sampling.
+
+### Generation and Chat Loops
+
+The `runq.c` file provides two main modes of operation:
+
+*   **`generate`**: This function generates a sequence of tokens from a given prompt. It takes a prompt as input, encodes it into tokens, and then iteratively calls the `forward` and `sample` functions to generate new tokens until the end-of-sequence token is reached or the maximum sequence length is exceeded.
+*   **`chat`**: This function provides an interactive chat mode. It takes a system prompt and a user prompt as input, and it alternates between reading user input and generating a response from the model. It also handles the context window by clearing it when it becomes full.
