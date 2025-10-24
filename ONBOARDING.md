@@ -128,3 +128,63 @@ Quantization is the process of reducing the precision of the model's weights. In
 ### 5.3. Byte Pair Encoding (BPE)
 
 BPE is a tokenization algorithm used to convert text into a sequence of integers that the model can understand. It works by iteratively merging the most frequent pairs of bytes in the training data. The `runq.c` program has its own BPE tokenizer to process the input prompt.
+
+## 6. Deep Dive into `runq.c`
+
+This section provides a more detailed breakdown of the `runq.c` file.
+
+### 6.1. Data Structures
+
+The `runq.c` file defines several key C structs to manage the model's state and weights:
+
+*   **`Config`**: This struct holds the model's hyperparameters, such as the dimension, number of layers, number of heads, vocabulary size, and sequence length. These values are read from the header of the `.bin` file.
+
+*   **`QuantizedTensor`**: This struct represents a quantized tensor. It contains a pointer to the quantized 8-bit integer values (`q`) and a pointer to the floating-point scaling factors (`s`).
+
+*   **`TransformerWeights`**: This struct holds all the weights of the model. It contains pointers to the various weights used in the transformer, including the token embeddings, RMS normalization weights, and the quantized weights for the attention mechanism and feed-forward networks.
+
+*   **`RunState`**: This struct holds the activations and buffers needed during the forward pass. This includes the current token's activation (`x`), the output of the attention mechanism (`xb`), the hidden states of the feed-forward network (`hb`, `hb2`), and the KV cache.
+
+*   **`Transformer`**: This is the main struct that encapsulates the entire model. It contains the model's `Config`, `TransformerWeights`, and `RunState`, as well as a pointer to the memory-mapped data from the `.bin` file.
+
+### 6.2. Core Functions
+
+The `runq.c` file can be broken down into several groups of core functions:
+
+*   **Model Loading and Memory Management**:
+    *   `memory_map_weights`: Maps the weights from the memory-mapped `.bin` file into the `TransformerWeights` struct.
+    *   `build_transformer`: Orchestrates the entire model setup process, including reading the checkpoint file and allocating memory for the run state.
+    *   `free_transformer`: Cleans up all allocated resources.
+
+*   **Quantization**:
+    *   `quantize`: Converts a block of floating-point numbers to 8-bit integers with a scaling factor.
+    *   `dequantize`: Converts a block of 8-bit integers back to floating-point numbers.
+
+*   **Neural Network Operations**:
+    *   `rmsnorm`: Implements the RMS normalization algorithm.
+    *   `softmax`: Implements the softmax function for the attention mechanism.
+    *   `matmul`: Performs the quantized matrix multiplication. This is where most of the computation occurs and is a key area for performance optimization.
+
+*   **The Forward Pass**:
+    *   `forward`: This is the most important function in the program. It executes a single forward pass of the transformer for a given token at a specific position. It orchestrates the calls to the other neural network operations and manages the KV cache.
+
+### 6.3. Tokenizer and Sampler
+
+The `runq.c` file also includes the logic for tokenization and sampling:
+
+*   **`Tokenizer`**: This struct holds the vocabulary and merge scores for the BPE tokenizer. The `build_tokenizer` function reads this data from a `.tokenizer` file.
+    *   `encode`: Implements the BPE algorithm to convert a string into a sequence of tokens.
+    *   `decode`: Converts a single token back into its string representation.
+
+*   **`Sampler`**: This struct holds the parameters for sampling, such as the temperature and top-p value.
+    *   `sample`: This function takes the logits from the `forward` pass and returns a sampled token. It supports greedy sampling, temperature-based sampling, and top-p (nucleus) sampling.
+
+### 6.4. Main Loop and CLI
+
+The program's execution is controlled by the `main` function and a few generation loops:
+
+*   **`main`**: This is the entry point of the program. It parses the command-line arguments, sets up the `Transformer`, `Tokenizer`, and `Sampler`, and then calls either the `generate` or `chat` function based on the selected mode.
+
+*   **`generate`**: This function is used for unconditional text generation. It takes a prompt, tokenizes it, and then enters a loop where it repeatedly calls the `forward` and `sample` functions to generate new tokens.
+
+*   **`chat`**: This function provides an interactive chat mode. It enters a loop that alternates between reading user input and generating a response from the model. It also handles the formatting of the chat prompts.
