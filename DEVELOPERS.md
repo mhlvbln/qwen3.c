@@ -16,37 +16,67 @@ The project is organized into the following key files:
 
 The `runq.c` file contains the core logic for running inference on Qwen3-architecture models. It's written in pure C with no dependencies, making it portable and easy to compile.
 
-### Key Data Structures
+### Memory Management
 
-- **`Config`**: This struct holds the model's hyperparameters, such as the transformer dimension, number of layers, and vocabulary size.
-- **`QuantizedTensor`**: Represents a tensor that has been quantized to 8-bit integers, with associated scaling factors.
-- **`TransformerWeights`**: This struct contains all the weights of the model, including the token embeddings, RMSNorm weights, and the weights for the attention and feed-forward network layers. The weights are stored as `QuantizedTensor`s.
-- **`RunState`**: This struct holds the activations and buffers needed during the forward pass, such as the key-value cache and the output logits.
-- **`Transformer`**: This is the main struct that brings everything together, containing the model's configuration, weights, and run state.
-- **`Tokenizer`**: This struct manages the vocabulary and the logic for encoding and decoding text.
-- **`Sampler`**: This struct handles the sampling of tokens from the output logits, with support for temperature-based and top-p sampling.
+The model checkpoint is loaded using memory mapping (`mmap`), which allows for efficient access to the model's weights without loading the entire file into RAM. The `read_checkpoint` function handles this process. The `Transformer` struct is then initialized, and its weights are mapped to the appropriate locations in the memory-mapped file. The `RunState`, which contains the activations and KV cache, is allocated separately on the heap using `calloc`.
 
-### Core Functions
+### The Forward Pass (`forward` function)
 
-- **`main`**: The entry point of the program, responsible for parsing command-line arguments, loading the model, and starting the generation or chat loop.
-- **`build_transformer`**: This function reads the model checkpoint file, allocates memory for the `Transformer` struct, and memory-maps the model weights.
-- **`forward`**: This is the heart of the inference engine. It takes a token and a position in the sequence and performs a forward pass of the transformer, calculating the logits for the next token.
-- **`generate`**: This function takes a prompt and generates a sequence of tokens until an end-of-sequence token is produced or the maximum sequence length is reached.
-- **`chat`**: This function implements a conversational loop, allowing for interactive chats with the model.
-- **`encode`** and **`decode`**: These functions, part of the `Tokenizer`, handle the conversion between text and tokens.
-- **`sample`**: This function, part of the `Sampler`, takes the logits from the `forward` pass and samples the next token.
+The `forward` function executes a single step of the transformer. For a given token at a specific position, it calculates the logits for the next token in the sequence. Here's a high-level overview of the process:
+
+1.  **Token Embedding**: The input token is converted into its corresponding embedding vector.
+2.  **Transformer Layers**: The input vector is processed by a series of transformer layers. Each layer consists of:
+    *   **Attention Mechanism**:
+        *   **RMSNorm**: The input is normalized.
+        *   **QKV Calculation**: The Query, Key, and Value vectors are computed via matrix multiplication.
+        *   **RoPE (Rotary Position Embedding)**: Positional information is added to the Query and Key vectors. The Q and K vectors are also normalized using QK-RMSNorm, a feature of the Qwen3 architecture.
+        *   **Scaled Dot-Product Attention**: The attention scores are calculated, and a weighted sum of the Value vectors is produced.
+        *   **Output Projection**: The result is projected back to the model's dimension.
+    *   **Feed-Forward Network (FFN)**:
+        *   **RMSNorm**: The output of the attention mechanism is normalized.
+        *   **SwiGLU**: The normalized output is passed through a SwiGLU activation function, which involves three separate linear transformations.
+    *   **Residual Connections**: The output of both the attention mechanism and the FFN are added to the input of their respective sub-layers, creating residual connections that help with gradient flow during training (and are a key part of the architecture).
+3.  **Final Normalization**: The output of the final transformer layer is passed through one last RMSNorm.
+4.  **Classification**: The final normalized output is multiplied by the token embedding matrix (which acts as a classifier) to produce the logits for the next token.
+
+### Tokenization
+
+The tokenizer uses a Byte Pair Encoding (BPE) algorithm. The `Tokenizer` struct, loaded from the `.tokenizer` file, contains the vocabulary and merge scores. The `encode` function takes a string and iteratively merges the most frequent pairs of tokens until no more merges can be performed. The `decode` function performs the reverse operation, converting a token ID back into its string representation.
+
+### Sampling
+
+The `Sampler` struct implements several strategies for selecting the next token from the logits produced by the `forward` pass:
+
+-   **Greedy Sampling**: If the temperature is set to 0, the token with the highest logit (the `argmax`) is always chosen.
+-   **Temperature Sampling**: The logits are divided by a temperature value. A higher temperature makes the distribution flatter, increasing the randomness of the output.
+-   **Top-p (Nucleus) Sampling**: This method samples from the smallest set of tokens whose cumulative probability exceeds a certain threshold (`p`). This avoids sampling from low-probability tokens, which can often lead to nonsensical output.
 
 ## Python Export Script (`export.py`)
 
 The `export.py` script is a command-line tool for converting pretrained Qwen3-architecture models from Hugging Face into the quantized format required by `runq.c`.
 
-### Key Functions
+### Model Conversion
 
-- **`load_hf_model`**: This function loads a model from the Hugging Face Hub using the `transformers` library. It then extracts the model's weights and configuration and loads them into a custom `Transformer` object, defined in `model.py`.
-- **`quantize_q80`**: This function performs Q8_0 quantization on a given tensor. This is a symmetric quantization scheme where the weights are scaled to fit within the range of an 8-bit signed integer (`-127` to `127`). To minimize quantization error, the quantization is done in groups of 64 values.
-- **`model_export`**: This is the main function for exporting the model. It takes the `Transformer` object, quantizes the weights using `quantize_q80`, and then serializes the model to a binary file. The file format consists of a 256-byte header followed by the model weights. The header contains the model's configuration, and the weights are a mix of `fp32` (for RMSNorm) and `int8` (for quantized tensors).
-- **`build_tokenizer`**: This function creates a custom tokenizer file (`.tokenizer`) from the Hugging Face tokenizer. This file contains the vocabulary and merge scores needed for the BPE tokenizer in `runq.c`.
-- **`build_prompts`**: This function generates prompt template files (`.template*`) based on the chat template from the Hugging Face tokenizer. These templates are used in `runq.c` to format prompts for chat mode.
+The `load_hf_model` function orchestrates the conversion process. It uses the `transformers` library to download and load the specified model from the Hugging Face Hub. The script then meticulously transfers the weights and configuration from the Hugging Face model to a custom `Transformer` object (defined in `model.py`), which mirrors the structure of the C implementation. This ensures a seamless transition of the model's architecture and parameters.
+
+### Quantization
+
+The `quantize_q80` function is central to the export process. It implements a Q8_0 symmetric quantization scheme, which significantly reduces the model's memory footprint with a minimal impact on performance. Here's how it works:
+
+1.  **Grouping**: The input tensor is divided into groups of a fixed size (typically 64).
+2.  **Scaling Factor**: For each group, the maximum absolute value is determined. A scaling factor is then calculated by dividing this maximum value by 127.
+3.  **Quantization**: Each value in the group is divided by the scaling factor and then rounded to the nearest integer, resulting in an 8-bit signed integer.
+4.  **Error Calculation**: The function also calculates the maximum quantization error for each group, providing a useful metric for assessing the quality of the quantization.
+
+This group-based quantization strategy is crucial for mitigating the impact of outliers in the weight distribution, which could otherwise lead to significant precision loss.
+
+### Output Files
+
+The `export.py` script generates several files:
+
+-   **`.bin` file**: This is the main model checkpoint file. It has a 256-byte header containing the model's configuration (`Config` struct), followed by the model's weights. The RMSNorm weights are stored in `fp32` format, while the attention and FFN weights are quantized and stored as `int8` values, along with their corresponding `fp32` scaling factors.
+-   **`.tokenizer` file**: This file contains the necessary information for the BPE tokenizer in `runq.c`. It includes the vocabulary size, the maximum token length, and for each token, its merge score and UTF-8 representation.
+-   **`.template*` files**: These files store the prompt templates used for chat mode. The templates are derived from the chat template of the Hugging Face tokenizer and are used to format the conversation history in a way that the model expects.
 
 ## Build Process
 
